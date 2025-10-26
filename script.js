@@ -372,4 +372,5 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Initial setup
     game.reset();
+    migrateUserScores();
 });

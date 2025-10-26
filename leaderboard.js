@@ -1,5 +1,6 @@
 const room = new WebsimSocket();
-const COLLECTION_NAME = 'leaderboard_scores_v3';
+const OLD_COLLECTION_NAME = 'leaderboard_scores_v3';
+const NEW_COLLECTION_NAME = 'leaderboard_profiles_v2';
 const LOCAL_STORAGE_KEY = 'circleTapPendingScores';
 
 class LocalStorageSync {
@@ -31,40 +32,157 @@ class LocalStorageSync {
 
 const scoreSync = new LocalStorageSync();
 
+// Migration function to be run on page load
+async function migrateUserScores() {
+    console.log("Checking for user score migration...");
+    try {
+        const currentUser = await window.websim.getCurrentUser();
+        if (!currentUser || !currentUser.username) {
+            console.warn("Cannot migrate scores, no current user found.");
+            return;
+        }
+
+        // 1. Fetch old scores for the current user
+        const oldScores = await new Promise(resolve => {
+            const unsub = room.collection(OLD_COLLECTION_NAME).filter({ username: currentUser.username }).subscribe(records => {
+                unsub();
+                resolve(records);
+            });
+        });
+
+        if (oldScores.length === 0) {
+            console.log("No old scores to migrate.");
+            return;
+        }
+
+        console.log(`Found ${oldScores.length} old scores to migrate for ${currentUser.username}.`);
+
+        // 2. Fetch or create new profile
+        const profileCollection = room.collection(NEW_COLLECTION_NAME);
+        const existingProfiles = await new Promise(resolve => {
+            const unsub = profileCollection.filter({ username: currentUser.username }).subscribe(records => {
+                unsub();
+                resolve(records);
+            });
+        });
+
+        let userProfile = existingProfiles.length > 0 ? existingProfiles[0] : null;
+
+        const newProfileData = {
+            easy: userProfile?.easy || [],
+            medium: userProfile?.medium || [],
+            hard: userProfile?.hard || [],
+        };
+        
+        let hasNewScoresToMerge = false;
+        
+        // 3. Aggregate old scores into the new format
+        oldScores.forEach(score => {
+            const difficulty = score.difficulty || 'easy';
+            const scoreData = {
+                score: score.score,
+                level: score.level,
+                replayDataUrl: score.replayDataUrl,
+                timestamp: score.timestamp
+            };
+            // Avoid duplicates
+            if (!newProfileData[difficulty].some(s => s.timestamp === score.timestamp)) {
+                 newProfileData[difficulty].push(scoreData);
+                 hasNewScoresToMerge = true;
+            }
+        });
+
+        if (!hasNewScoresToMerge) {
+            console.log("All old scores already present in new profile. Deleting redundant old entries.");
+        } else {
+             // 4. Create or Update the new profile document
+            if (userProfile) {
+                console.log("Updating existing profile.");
+                await profileCollection.update(userProfile.id, newProfileData);
+            } else {
+                console.log("Creating new profile.");
+                await profileCollection.create(newProfileData);
+            }
+        }
+
+        // 5. Delete the old scores after successful migration
+        console.log("Deleting old score entries...");
+        for (const score of oldScores) {
+            try {
+                await room.collection(OLD_COLLECTION_NAME).delete(score.id);
+            } catch (deleteError) {
+                // This might fail if another client deletes it first, which is okay.
+                // console.warn(`Could not delete old score ${score.id}:`, deleteError.message);
+            }
+        }
+        
+        console.log("Migration complete.");
+
+    } catch (error) {
+        console.error("Error during user score migration:", error);
+    }
+}
+
 export async function submitScore(lastGameData, onSuccess, onError) {
     try {
         let gameDataForDb = { ...lastGameData };
+        // Step 1: Upload replay data
         if (gameDataForDb.replayData) {
             try {
                 const replayJson = JSON.stringify(gameDataForDb.replayData);
                 const replayBlob = new Blob([replayJson], { type: 'application/json' });
                 const replayFile = new File([replayBlob], 'replay.json');
-                const replayUrl = await window.websim.upload(replayFile);
-
-                gameDataForDb.replayDataUrl = replayUrl;
+                gameDataForDb.replayDataUrl = await window.websim.upload(replayFile);
                 delete gameDataForDb.replayData;
-
             } catch (uploadError) {
                 console.error("Error uploading replay data:", uploadError);
+                // Don't save locally if upload fails, as the replay is a core part
                 if (onError) onError(uploadError);
-                return; // Stop submission if upload fails
+                return;
             }
         }
 
-        const scoreRecord = {
+        // Step 2: Prepare the score object
+        const newScore = {
             score: gameDataForDb.score,
             level: gameDataForDb.level,
-            difficulty: gameDataForDb.difficulty,
             replayDataUrl: gameDataForDb.replayDataUrl,
             timestamp: gameDataForDb.timestamp,
         };
-        
-        await room.collection(COLLECTION_NAME).create(scoreRecord);
+
+        const difficulty = gameDataForDb.difficulty;
+        const profileCollection = room.collection(NEW_COLLECTION_NAME);
+
+        // Step 3: Find user's existing profile
+        const currentUser = await window.websim.getCurrentUser();
+        const profiles = await new Promise(resolve => {
+            const unsub = profileCollection.filter({ username: currentUser.username }).subscribe(records => {
+                unsub();
+                resolve(records);
+            });
+        });
+        const userProfile = profiles.length > 0 ? profiles[0] : null;
+
+        // Step 4: Update or create profile
+        if (userProfile) {
+            const updatedScores = userProfile[difficulty] ? [...userProfile[difficulty], newScore] : [newScore];
+            await profileCollection.update(userProfile.id, { [difficulty]: updatedScores });
+        } else {
+            const newProfile = {
+                easy: [],
+                medium: [],
+                hard: [],
+                [difficulty]: [newScore],
+            };
+            await profileCollection.create(newProfile);
+        }
+
         scoreSync.removeScore(gameDataForDb.timestamp);
-        
         if (onSuccess) onSuccess();
     } catch (error) {
         console.error("Error submitting score:", error);
+        // Fallback for offline/errors: add to local storage for sync/migration later
+        scoreSync.addScore(lastGameData);
         if (onError) onError(error);
     }
 }
@@ -77,6 +195,9 @@ export async function syncScores() {
         return;
     }
 
+    // Run migration first to ensure new profile exists if possible
+    await migrateUserScores();
+
     try {
         const currentUser = await window.websim.getCurrentUser();
         if (!currentUser || !currentUser.username) {
@@ -84,22 +205,11 @@ export async function syncScores() {
             return;
         }
 
-        // Fetch all scores from the database once
-        const allDbScoresRaw = await new Promise(resolve => {
-            const unsub = room.collection(COLLECTION_NAME).subscribe(records => {
-                unsub();
-                resolve(records);
-            });
-        });
-
-        const userDbScores = allDbScoresRaw.filter(s => s.username === currentUser.username);
-        const userDbTimestamps = new Set(userDbScores.map(s => s.timestamp));
-
-        const scoresToUpload = pending.filter(localScore => !userDbTimestamps.has(localScore.timestamp));
-
-        if (scoresToUpload.length > 0) {
-            console.log(`Syncing ${scoresToUpload.length} scores...`);
-            for (const gameData of scoresToUpload) {
+        // In the new model, we don't need to check against old scores.
+        // We just need to add pending local scores to the user's profile.
+        if (pending.length > 0) {
+            console.log(`Syncing ${pending.length} scores...`);
+            for (const gameData of pending) {
                 console.log(`Uploading score from ${gameData.timestamp}`);
                 await submitScore(gameData, null, (err) => {
                     console.error(`Sync failed for score ${gameData.timestamp}:`, err);
@@ -108,8 +218,6 @@ export async function syncScores() {
             console.log("Sync process completed.");
         } else {
             console.log("All local scores are already on the server.");
-            // If all local scores are on the server, we can clear the pending list
-            pending.forEach(p => scoreSync.removeScore(p.timestamp));
         }
 
     } catch (error) {
@@ -118,40 +226,49 @@ export async function syncScores() {
 }
 
 export async function fetchLeaderboard(difficulty) {
-    const collection = room.collection(COLLECTION_NAME);
-    const filteredCollection = difficulty ? collection.filter({ difficulty: difficulty }) : collection;
-
-    const allScores = await new Promise(resolve => {
-        let unsubscribe;
-        
-        const timeout = setTimeout(() => {
-            if (unsubscribe) unsubscribe();
-            resolve(filteredCollection.getList());
-        }, 2500);
-
-        unsubscribe = filteredCollection.subscribe(records => {
-            clearTimeout(timeout);
-            if (unsubscribe) unsubscribe();
+    const fetchOldScores = new Promise(resolve => {
+        const unsub = room.collection(OLD_COLLECTION_NAME).filter({ difficulty }).subscribe(records => {
+            unsub();
             resolve(records);
         });
     });
 
-    if (!allScores || allScores.length === 0) {
-        return [];
-    }
-
-    const players = {}; // Group scores by username
-    allScores.forEach(scoreRecord => {
-        const username = scoreRecord.username;
-        if (!players[username]) {
-            players[username] = {
-                username: username,
-                allScores: []
-            };
-        }
-        players[username].allScores.push(scoreRecord);
+    const fetchNewProfiles = new Promise(resolve => {
+        const unsub = room.collection(NEW_COLLECTION_NAME).subscribe(records => {
+            unsub();
+            resolve(records);
+        });
     });
 
+    const [oldScores, newProfiles] = await Promise.all([fetchOldScores, fetchNewProfiles]);
+
+    const players = {}; // Group scores by username
+
+    // Process new profiles first
+    newProfiles.forEach(profile => {
+        const username = profile.username;
+        const scoresForDifficulty = profile[difficulty] || [];
+
+        if (scoresForDifficulty.length > 0) {
+            if (!players[username]) {
+                players[username] = { username: username, allScores: [] };
+            }
+            players[username].allScores.push(...scoresForDifficulty);
+        }
+    });
+
+    // Process old scores, only for users not already in the new format
+    oldScores.forEach(scoreRecord => {
+        const username = scoreRecord.username;
+        if (!players[username]) {
+            players[username] = { username: username, allScores: [] };
+        }
+        // Add if not already processed from a new profile (avoids race conditions during migration)
+        if (!players[username].allScores.some(s => s.timestamp === scoreRecord.timestamp)) {
+             players[username].allScores.push(scoreRecord);
+        }
+    });
+    
     const rankedPlayers = Object.values(players).map(playerData => {
         const bestGame = playerData.allScores.reduce((best, current) => {
             if (!best) return current;
