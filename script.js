@@ -1,6 +1,6 @@
 import { Game, difficulties } from './game.js';
 import { UIController } from './ui.js';
-import { submitScore, fetchLeaderboard, renderLeaderboardList, renderLeaderboardPagination, syncScores } from './leaderboard.js';
+import { submitScore, fetchLeaderboard, renderLeaderboardList, renderLeaderboardPagination, syncScores, migrateUserScores } from './leaderboard.js';
 import { showReplay, hideReplay } from './replay.js';
 import { playBackgroundMusic, fadeInMusic, fadeOutMusic } from './audio.js';
 

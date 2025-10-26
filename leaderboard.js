@@ -33,7 +33,7 @@ class LocalStorageSync {
 const scoreSync = new LocalStorageSync();
 
 // Migration function to be run on page load
-async function migrateUserScores() {
+export async function migrateUserScores() {
     console.log("Checking for user score migration...");
     try {
         const currentUser = await window.websim.getCurrentUser();
