@@ -66,7 +66,10 @@ export async function migrateUserScores() {
             });
         });
 
-        let userProfile = existingProfiles.length > 0 ? existingProfiles[0] : null;
+        // If multiple profiles exist, merge into the newest one.
+        let userProfile = existingProfiles.length > 0 
+            ? existingProfiles.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0] 
+            : null;
 
         const newProfileData = {
             easy: userProfile?.easy || [],
@@ -153,7 +156,7 @@ export async function submitScore(lastGameData, onSuccess, onError) {
         const difficulty = gameDataForDb.difficulty;
         const profileCollection = room.collection(NEW_COLLECTION_NAME);
 
-        // Step 3: Find user's existing profile
+        // Step 3: Find user's existing profile right before submission
         const currentUser = await window.websim.getCurrentUser();
         const profiles = await new Promise(resolve => {
             const unsub = profileCollection.filter({ username: currentUser.username }).subscribe(records => {
@@ -161,7 +164,11 @@ export async function submitScore(lastGameData, onSuccess, onError) {
                 resolve(records);
             });
         });
-        const userProfile = profiles.length > 0 ? profiles[0] : null;
+        
+        // If multiple profiles exist, update the newest one.
+        const userProfile = profiles.length > 0
+            ? profiles.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0]
+            : null;
 
         // Step 4: Update or create profile
         if (userProfile) {
