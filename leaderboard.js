@@ -44,8 +44,9 @@ export async function migrateUserScores() {
 
         // 1. Fetch old scores for the current user
         const oldScores = await new Promise(resolve => {
-            const unsub = room.collection(OLD_COLLECTION_NAME).filter({ username: currentUser.username }).subscribe(records => {
-                unsub();
+            let unsub;
+            unsub = room.collection(OLD_COLLECTION_NAME).filter({ username: currentUser.username }).subscribe(records => {
+                if (unsub) unsub();
                 resolve(records);
             });
         });
@@ -60,8 +61,9 @@ export async function migrateUserScores() {
         // 2. Fetch or create new profile
         const profileCollection = room.collection(NEW_COLLECTION_NAME);
         const existingProfiles = await new Promise(resolve => {
-            const unsub = profileCollection.filter({ username: currentUser.username }).subscribe(records => {
-                unsub();
+            let unsub;
+            unsub = profileCollection.filter({ username: currentUser.username }).subscribe(records => {
+                if (unsub) unsub();
                 resolve(records);
             });
         });
@@ -159,8 +161,9 @@ export async function submitScore(lastGameData, onSuccess, onError) {
         // Step 3: Find user's existing profile right before submission
         const currentUser = await window.websim.getCurrentUser();
         const profiles = await new Promise(resolve => {
-            const unsub = profileCollection.filter({ username: currentUser.username }).subscribe(records => {
-                unsub();
+            let unsub;
+            unsub = profileCollection.filter({ username: currentUser.username }).subscribe(records => {
+                if (unsub) unsub();
                 resolve(records);
             });
         });
@@ -234,15 +237,17 @@ export async function syncScores() {
 
 export async function fetchLeaderboard(difficulty) {
     const fetchOldScores = new Promise(resolve => {
-        const unsub = room.collection(OLD_COLLECTION_NAME).filter({ difficulty }).subscribe(records => {
-            unsub();
+        let unsub;
+        unsub = room.collection(OLD_COLLECTION_NAME).filter({ difficulty }).subscribe(records => {
+            if (unsub) unsub();
             resolve(records);
         });
     });
 
     const fetchNewProfiles = new Promise(resolve => {
-        const unsub = room.collection(NEW_COLLECTION_NAME).subscribe(records => {
-            unsub();
+        let unsub;
+        unsub = room.collection(NEW_COLLECTION_NAME).subscribe(records => {
+            if (unsub) unsub();
             resolve(records);
         });
     });
